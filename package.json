@@ -1,0 +1,85 @@
+{
+  "name": "dark-lang",
+  "displayName": "Dark Programming Language",
+  "description": "Syntax highlighting and runner for the Dark language.",
+  "version": "0.3.1",
+  "publisher": "vsp210",
+  "icon": "icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Dark-Tehno/dark-lang.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:dark"
+  ],
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "dark.run",
+        "title": "Run Dark File",
+        "icon": "$(play)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "when": "resourceLangId == dark",
+          "command": "dark.run",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Dark Language",
+      "properties": {
+        "dark.executorPath": {
+          "type": "string",
+          "default": "",
+          "description": "The absolute path to the Dark language executable (e.g., dark_start.exe)."
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "dark",
+        "aliases": [
+          "Dark",
+          "dark"
+        ],
+        "extensions": [
+          ".dark"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icon.png",
+          "dark": "./icon.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "dark",
+        "scopeName": "source.dark",
+        "path": "./syntaxes/dark.tmLanguage.json"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.3"
+  }
+}

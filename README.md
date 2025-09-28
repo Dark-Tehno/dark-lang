@@ -41,7 +41,7 @@
 Для Windows:
 ```json
 {
-    "dark.executorPath": "C:\Program Files (x86)\Dark-Lang-0-1-1\dark_start.exe"
+    "dark.executorPath": "C:\\Program Files (x86)\\Dark-Lang-0-1-1\\dark_start.exe"
 }
 ```
 

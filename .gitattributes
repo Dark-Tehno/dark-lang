@@ -1,12 +1,19 @@
- # Устанавливаем поведение по умолчанию для всех текстовых файлов
- * text=auto
- 
- # Явно указываем окончания строк (LF) для самых важных типов файлов
- *.ts eol=lf
- *.json eol=lf
- *.md eol=lf
- .gitignore eol=lf
- 
- # Для бинарных файлов отключаем обработку
- *.png binary
- *.ico binary
+# Установить поведение по умолчанию для всех файлов
+* text=auto eol=lf
+
+# Явно указать текстовые файлы, которые должны иметь LF
+*.js      eol=lf
+*.ts      eol=lf
+*.json    eol=lf
+*.py      eol=lf
+*.md      eol=lf
+*.spec    eol=lf
+*.dark    eol=lf
+*.txt     eol=lf
+*.gitignore eol=lf
+*.gitattributes eol=lf
+
+# Указать файлы, которые должны оставаться без изменений (бинарные)
+*.png     binary
+*.ico     binary
+*.exe     binary

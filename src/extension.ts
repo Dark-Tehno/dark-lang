@@ -790,6 +790,30 @@ function updateDiagnostics(document: vscode.TextDocument, collection: vscode.Dia
     });
 }
 
+/**
+ * Получает команду для запуска исполняемого файла Dark.
+ * На Linux по умолчанию используется 'dark', если путь не задан в настройках.
+ * На других системах требуется явное указание пути.
+ * @returns {string | null} Команда или путь к исполняемому файлу, или null, если не найден.
+ */
+function getExecutorCommand(): string | null {
+    const config = vscode.workspace.getConfiguration('dark');
+    const executorPath = config.get<string>('executorPath');
+
+    // 1. Если путь указан явно, используем его.
+    if (executorPath) {
+        return executorPath;
+    }
+
+    // 2. Если путь не указан и система - Linux, предполагаем, что 'dark' есть в PATH.
+    if (process.platform === 'linux') {
+        return 'dark';
+    }
+
+    // 3. Для других систем путь обязателен.
+    return null;
+}
+
 export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(vscode.window.onDidCloseTerminal(terminal => {
@@ -814,17 +838,18 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
         const config = vscode.workspace.getConfiguration('dark');
-        const executorPath = config.get<string>('executorPath');
-        if (!executorPath) {
+        const executorCommand = getExecutorCommand();
+        if (!executorCommand) {
             vscode.window.showErrorMessage(
                 'Path to Dark executor is not set. Please set "dark.executorPath" in your settings.'
             );
             return;
         }
+
         const filePath = editor.document.uri.fsPath;
         const terminal = getDarkTerminal();
         terminal.show();
-        const command = `"${executorPath}" "${filePath}"`;
+        const command = `"${executorCommand}" "${filePath}"`;
         terminal.sendText(command);
     });
 

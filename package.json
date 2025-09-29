@@ -2,7 +2,7 @@
   "name": "dark-lang",
   "displayName": "Dark Programming Language",
   "description": "Syntax highlighting and runner for the Dark language.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "vsp210",
   "icon": "icon.png",
   "license": "MIT",

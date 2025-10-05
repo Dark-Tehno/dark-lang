@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
+import * as path from 'path';
 
 // Мы будем управлять одним экземпляром терминала для всех запусков
 let darkTerminal: vscode.Terminal | undefined;
@@ -22,6 +23,7 @@ let lastAnalysis: AnalyzedDocument | undefined;
 /** Описывает найденную переменную */
 interface AnalyzedVariable {
     name: string;
+    type?: string; // Добавляем тип для глобальных переменных
 }
 
 /** Описывает найденный класс */
@@ -29,6 +31,7 @@ interface AnalyzedClass {
     name: string;
     parent?: string;
     methods: AnalyzedFunction[];
+    properties: AnalyzedVariable[];
     startLine: number;
     endLine: number;
 }
@@ -53,8 +56,15 @@ interface AnalyzedDocument {
     functions: AnalyzedFunction[];
     classes: AnalyzedClass[];
     imports: AnalyzedVariable[];
+    usedImports: AnalyzedVariable[];
 }
 
+/** Описывает импорт через `from ... use ...` */
+interface AnalyzedFromImport {
+    modulePath: string;
+    names: string[];
+    line: number;
+}
 /**
  * Находит соответствующий 'end' для блока, начинающегося на startLine,
  * корректно обрабатывая вложенные блоки.
@@ -89,13 +99,17 @@ function analyzeDocument(document: vscode.TextDocument): AnalyzedDocument {
     const analyzedClasses: AnalyzedClass[] = [];
     const globalVariables: AnalyzedVariable[] = [];
     const imports: AnalyzedVariable[] = [];
+    const usedImports: AnalyzedVariable[] = [];
+    const fromImports: AnalyzedFromImport[] = [];
 
-    const keywords = ['if', 'then', 'else', 'end', 'while', 'do', 'for', 'in', 'return', 'import', 'function', 'true', 'false', 'try', 'except', 'and', 'or', 'not', 'class'];
+    const keywords = ['if', 'then', 'else', 'end', 'while', 'do', 'for', 'in', 'return', 'import', 'function', 'true', 'false', 'try', 'except', 'and', 'or', 'not', 'class', 'from', 'use'];
 
     const classRegex = /^\s*class\s+([a-zA-Z_]\w*)\s*(?:\(\s*([a-zA-Z_]\w*)\s*\))?/;
     const functionRegex = /^\s*function\s+([a-zA-Z_]\w*)\s*([^\r\n]*)/;
     const variableRegex = /^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=/;
+    const classInstantiationRegex = /^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([a-zA-Z_]\w*)\s*\(/;
     const importRegex = /^\s*import\s*"((?:\\.|[^"\\])*)"/;
+    const fromUseRegex = /^\s*from\s*"((?:\\.|[^"\\])*)"\s+use\s+(.*)/;
 
     const parseFunction = (startLine: number, isMethod: boolean = false, className: string = ''): { func: AnalyzedFunction, end: number } | null => {
         const lineText = lines[startLine];
@@ -170,14 +184,29 @@ function analyzeDocument(document: vscode.TextDocument): AnalyzedDocument {
             const startLine = i;
             const endLine = findMatchingEnd(document, startLine);
             const methods: AnalyzedFunction[] = [];
+            const properties = new Set<string>();
+
             for (let j = startLine + 1; j < endLine; j++) {
                 const methodResult = parseFunction(j, true, classMatch[1]);
                 if (methodResult) {
                     methods.push(methodResult.func);
+
+                    // Анализируем тело метода на предмет присваивания свойств (object.prop = ...)
+                    if (methodResult.func.parameters.length > 0) {
+                        const selfParamName = methodResult.func.parameters[0].name;
+                        const propertyRegex = new RegExp(`^\\s*${selfParamName}\\.([a-zA-Z_]\\w*)\\s*=\\s*`);
+                        for (let k = methodResult.func.startLine + 1; k < methodResult.func.endLine; k++) {
+                            const propMatch = lines[k].match(propertyRegex);
+                            if (propMatch) {
+                                properties.add(propMatch[1]);
+                            }
+                        }
+                    }
                     j = methodResult.end;
                 }
             }
-            analyzedClasses.push({ name: classMatch[1], parent: classMatch[2], methods, startLine, endLine });
+            const analyzedProperties = Array.from(properties).map(name => ({ name }));
+            analyzedClasses.push({ name: classMatch[1], parent: classMatch[2], methods, properties: analyzedProperties, startLine, endLine });
             i = endLine;
             continue;
         }
@@ -195,6 +224,23 @@ function analyzeDocument(document: vscode.TextDocument): AnalyzedDocument {
             continue;
         }
 
+        const fromUseMatch = lineText.match(fromUseRegex);
+        if (fromUseMatch) {
+            const usedNames = fromUseMatch[2].split(',').map(name => name.trim()).filter(name => name);
+            usedNames.forEach(name => {
+                // Рассматриваем импортированные имена как глобальные переменные/функции
+                usedImports.push({ name: name });
+            });
+            continue;
+        }
+
+        const classInitMatch = lineText.match(classInstantiationRegex);
+        if (classInitMatch) {
+            const varName = classInitMatch[1];
+            const className = classInitMatch[2];
+            globalVariables.push({ name: varName, type: className });
+            continue;
+        }
         const varMatch = lineText.match(variableRegex);
         if (varMatch && !keywords.includes(varMatch[1])) {
             globalVariables.push({ name: varMatch[1] });
@@ -205,7 +251,9 @@ function analyzeDocument(document: vscode.TextDocument): AnalyzedDocument {
         globals: globalVariables,
         functions: analyzedFunctions,
         classes: analyzedClasses,
-        imports: imports
+        imports: imports,
+        usedImports: usedImports,
+        // fromImports: fromImports // This was part of a thought process but is not needed if hover provider is async
     };
 }
 
@@ -353,14 +401,150 @@ const builtInFunctions = {
     }
 };
 
+const specialClassMethods = {
+    '__main__': {
+        detail: 'function __main__()',
+        documentation: '### Специальный метод (Опасно)\n\nВыполняется, если класс является точкой входа в программу.',
+        snippet: 'function __main__()\n\t${1}\nend'
+    },
+    '__str__': {
+        detail: 'function __str__()',
+        documentation: '### Специальный метод (Опасно)\n\nВозвращает строковое представление объекта. Вызывается функциями `print`, `println` и `to_str`.',
+        snippet: 'function __str__()\n\treturn "${1:string representation}"\nend'
+    },
+    '__add__': {
+        detail: 'function __add__(other)',
+        documentation: '### Специальный метод (Опасно)\n\nПерегрузка оператора сложения (`+`).',
+        snippet: 'function __add__(other)\n\t${1}\nend'
+    },
+    '__sub__': {
+        detail: 'function __sub__(other)',
+        documentation: '### Специальный метод (Опасно)\n\nПерегрузка оператора вычитания (`-`).',
+        snippet: 'function __sub__(other)\n\t${1}\nend'
+    },
+    '__mul__': {
+        detail: 'function __mul__(other)',
+        documentation: '### Специальный метод (Опасно)\n\nПерегрузка оператора умножения (`*`).',
+        snippet: 'function __mul__(other)\n\t${1}\nend'
+    },
+    '__div__': {
+        detail: 'function __div__(other)',
+        documentation: '### Специальный метод (Опасно)\n\nПерегрузка оператора деления (`/`).',
+        snippet: 'function __div__(other)\n\t${1}\nend'
+    },
+    '__radd__': {
+        detail: 'function __radd__(other)',
+        documentation: '### Специальный метод (Опасно)\n\nПравосторонняя перегрузка оператора сложения (`+`).',
+        snippet: 'function __radd__(other)\n\t${1}\nend'
+    },
+    '__rsub__': {
+        detail: 'function __rsub__(other)',
+        documentation: '### Специальный метод (Опасно)\n\nПравосторонняя перегрузка оператора вычитания (`-`).',
+        snippet: 'function __rsub__(other)\n\t${1}\nend'
+    },
+    '__rmul__': {
+        detail: 'function __rmul__(other)',
+        documentation: '### Специальный метод (Опасно)\n\nПравосторонняя перегрузка оператора умножения (`*`).',
+        snippet: 'function __rmul__(other)\n\t${1}\nend'
+    },
+    '__rdiv__': {
+        detail: 'function __rdiv__(other)',
+        documentation: '### Специальный метод (Опасно)\n\nПравосторонняя перегрузка оператора деления (`/`).',
+        snippet: 'function __rdiv__(other)\n\t${1}\nend'
+    },
+    '__lt__': { detail: 'function __lt__(other)', documentation: '### Специальный метод (Опасно)\n\nПерегрузка оператора "меньше" (`<`).', snippet: 'function __lt__(other)\n\t${1}\nend' },
+    '__gt__': { detail: 'function __gt__(other)', documentation: '### Специальный метод (Опасно)\n\nПерегрузка оператора "больше" (`>`).', snippet: 'function __gt__(other)\n\t${1}\nend' },
+    '__le__': { detail: 'function __le__(other)', documentation: '### Специальный метод (Опасно)\n\nПерегрузка оператора "меньше или равно" (`<=`).', snippet: 'function __le__(other)\n\t${1}\nend' },
+    '__ge__': { detail: 'function __ge__(other)', documentation: '### Специальный метод (Опасно)\n\nПерегрузка оператора "больше или равно" (`>=`).', snippet: 'function __ge__(other)\n\t${1}\nend' },
+    '__eq__': { detail: 'function __eq__(other)', documentation: '### Специальный метод (Опасно)\n\nПерегрузка оператора "равно" (`==`).', snippet: 'function __eq__(other)\n\t${1}\nend' },
+    '__ne__': { detail: 'function __ne__(other)', documentation: '### Специальный метод (Опасно)\n\nПерегрузка оператора "не равно" (`!=`).', snippet: 'function __ne__(other)\n\t${1}\nend' },
+};
+
 // --- ПРОВАЙДЕР АВТОДОПОЛНЕНИЯ (COMPLETION) ---
 const completionProvider = vscode.languages.registerCompletionItemProvider(
     'dark',
     {
-        provideCompletionItems(document: vscode.TextDocument, position: vscode.Position, token: vscode.CancellationToken, context: vscode.CompletionContext) {
+        async provideCompletionItems(document: vscode.TextDocument, position: vscode.Position, token: vscode.CancellationToken, context: vscode.CompletionContext) {
             const linePrefix = document.lineAt(position).text.substring(0, position.character);
             const lineText = document.lineAt(position).text;
 
+            // 1. Улучшенная обработка доступа к членам (например, `my_var.met` или `Test(12).`)
+            const memberAccessMatch = linePrefix.match(/([a-zA-Z_]\w*(?:\s*\([^)]*\))?)\.([a-zA-Z_]\w*)?$/);
+            if (memberAccessMatch) {
+                const analysis = getAnalyzedDocument(document);
+                let objectName = memberAccessMatch[1];
+                let objectType: string | undefined = undefined;
+
+                // Определяем, находимся ли мы внутри метода
+                const currentClass = analysis.classes.find(c => position.line > c.startLine && position.line < c.endLine);
+                if (currentClass) {
+                    const currentMethod = currentClass.methods.find(m => position.line >= m.startLine && position.line <= m.endLine);
+                    // Если `objectName` - это первый параметр метода (self/object), то его тип - это текущий класс
+                    if (currentMethod && currentMethod.parameters.length > 0 && currentMethod.parameters[0].name === objectName) {
+                        objectType = currentClass.name;
+                    }
+                }
+
+                // Если тип еще не определен, ищем его среди глобальных переменных
+                if (!objectType) {
+                    const globalVar = analysis.globals.find(g => g.name === objectName);
+                    if (globalVar && globalVar.type) {
+                        objectType = globalVar.type;
+                    }
+                }
+
+                // Если это вызов конструктора на лету, например `Test(12).`
+                const constructorCallMatch = objectName.match(/([a-zA-Z_]\w*)\s*\([^)]*\)$/);
+                if (constructorCallMatch) {
+                    const className = constructorCallMatch[1];
+                    if (analysis.classes.some(c => c.name === className)) {
+                        objectType = className;
+                    }
+                }
+
+                // Если мы нашли тип объекта, предлагаем методы этого класса
+                if (objectType) {
+                    const classInfo = analysis.classes.find(c => c.name === objectType);
+                    if (classInfo) {
+                        const methodCompletions = classInfo.methods.map(method => createMethodCompletionItem(method));
+                        const propertyCompletions = classInfo.properties.map(prop => 
+                            new vscode.CompletionItem(prop.name, vscode.CompletionItemKind.Property)
+                        );
+                        return [...methodCompletions, ...propertyCompletions];
+                    }
+                }
+            }
+            // Улучшенное автодополнение для `from ... use ...`
+            const fromUseContextMatch = lineText.match(/^\s*from\s*"([^"]+)"\s+use\s+(.*)/);
+            if (fromUseContextMatch) {
+                const useKeywordIndex = lineText.indexOf('use');
+                if (position.character > useKeywordIndex + 3) { // Курсор после 'use '
+                    const moduleName = fromUseContextMatch[1];
+                    const alreadyImported = fromUseContextMatch[2].split(',').map(s => s.trim());
+
+                    const currentDir = path.dirname(document.uri.fsPath);
+                    const modulePath = path.resolve(currentDir, `${moduleName}.dark`);
+
+                    try {
+                        const moduleUri = vscode.Uri.file(modulePath);
+                        const moduleDoc = await vscode.workspace.openTextDocument(moduleUri);
+                        const moduleAnalysis = analyzeDocument(moduleDoc); // Используем обычный analyzeDocument
+
+                        const suggestions: vscode.CompletionItem[] = [];
+                        
+                        moduleAnalysis.functions.forEach(f => suggestions.push(new vscode.CompletionItem(f.name, vscode.CompletionItemKind.Function)));
+                        moduleAnalysis.globals.forEach(g => suggestions.push(new vscode.CompletionItem(g.name, vscode.CompletionItemKind.Variable)));
+                        moduleAnalysis.classes.forEach(c => suggestions.push(new vscode.CompletionItem(c.name, vscode.CompletionItemKind.Class)));
+
+                        // Фильтруем уже добавленные имена
+                        return suggestions.filter(item => !alreadyImported.includes(item.label as string));
+
+                    } catch (error) {
+                        console.error(`Could not analyze module ${moduleName}:`, error);
+                        return []; // Не удалось прочитать/проанализировать файл
+                    }
+                }
+            }
             // Специальная логика для автодополнения внутри import "..."
             const importMatch = lineText.match(/^\s*import\s*"(.*)/);
             if (importMatch) {
@@ -374,58 +558,9 @@ const completionProvider = vscode.languages.registerCompletionItemProvider(
                 }
             }
 
-            // 1. Обработка доступа к членам (os. или my_var.)
-            const memberAccessMatch = linePrefix.match(/([a-zA-Z_]\w*)\.$/);
-            if (memberAccessMatch) {
-                const analysis = getAnalyzedDocument(document);
-                const objectName = memberAccessMatch[1];
-
-                // Если это модуль из стандартной библиотеки
-                if (objectName in standardLibrary) {
-                    const module = standardLibrary[objectName as keyof typeof standardLibrary] as Record<string, any>;
-                    return Object.entries(module).map(([name, data]) => {
-                        const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Function);
-                        item.detail = data.detail;
-                        item.documentation = new vscode.MarkdownString(data.documentation);
-                        item.insertText = new vscode.SnippetString(data.snippet);
-                        return item;
-                    });
-                }
-            
-                // NEW: Предлагаем методы для классов
-                const methodCompletions: vscode.CompletionItem[] = [];
-                const addedMethodsFromClasses = new Set<string>();
-                analysis.classes.forEach(cls => {
-                    cls.methods.forEach(method => {
-                        if (!addedMethodsFromClasses.has(method.name)) {
-                            const item = new vscode.CompletionItem(method.name, vscode.CompletionItemKind.Method);
-                            item.detail = method.detail;
-                            item.documentation = new vscode.MarkdownString(method.documentation);
-                            item.insertText = new vscode.SnippetString(method.snippet.value);
-                            methodCompletions.push(item);
-                            addedMethodsFromClasses.add(method.name);
-                        }
-                    });
-                });
-                const addedMethods = new Set<string>();
-                Object.entries(builtInMethods).forEach(([type, methods]) => {
-                    Object.entries(methods).forEach(([methodName, methodData]) => {
-                        if (!addedMethods.has(methodName)) {
-                            const item = new vscode.CompletionItem(methodName, vscode.CompletionItemKind.Method);
-                            item.detail = methodData.detail;
-                            item.documentation = new vscode.MarkdownString(`Метод для типа **${type}**.\n\n${methodData.documentation}`);
-                            item.insertText = new vscode.SnippetString(methodData.snippet);
-                            methodCompletions.push(item);
-                            addedMethods.add(methodName);
-                        }
-                    });
-                });
-                return methodCompletions;
-            }
-
             // 2. Глобальные подсказки (если не было точки)
             const keywords = [
-                'if', 'then', 'else', 'end', 'while', 'do', 'for', 'in', 'return', 'import', 'function', 'try', 'except', 'and', 'or', 'not', 'class'
+                'if', 'then', 'else', 'end', 'while', 'do', 'for', 'in', 'return', 'import', 'function', 'try', 'except', 'and', 'or', 'not', 'class', 'from', 'use'
             ];
             const keywordCompletions = keywords.map(
                 keyword => new vscode.CompletionItem(keyword, vscode.CompletionItemKind.Keyword)
@@ -446,16 +581,29 @@ const completionProvider = vscode.languages.registerCompletionItemProvider(
 
             // Анализ текущего файла
             const analysis = getAnalyzedDocument(document);
-
             // Определяем, в какой функции мы находимся
-            const currentFunction = analysis.functions.find(
+            let currentFunction = analysis.functions.find(
                 f => position.line >= f.startLine && position.line <= f.endLine
             );
 
             const availableVariables = new Set<string>();
 
+            // Также проверяем, не находимся ли мы внутри метода класса
+            if (!currentFunction) {
+                const currentClass = analysis.classes.find(c => position.line > c.startLine && position.line < c.endLine);
+                if (currentClass) {
+                    const currentMethod = currentClass.methods.find(m => position.line >= m.startLine && position.line <= m.endLine);
+                    if (currentMethod) {
+                        currentFunction = currentMethod; // Рассматриваем метод как текущую функцию
+                    }
+                }
+            }
+
             // Глобальные переменные доступны всегда
             analysis.globals.forEach(v => availableVariables.add(v.name));
+            
+            // Имена, импортированные через `from ... use ...` также глобальны
+            analysis.usedImports.forEach(v => availableVariables.add(v.name));
 
             // Если мы внутри функции, добавляем ее параметры и локальные переменные
             if (currentFunction) {
@@ -490,7 +638,7 @@ const completionProvider = vscode.languages.registerCompletionItemProvider(
                 return item;
             });
 
-            return [
+            const allCompletions = [
                 ...keywordCompletions,
                 ...functionCompletions,
                 ...constantCompletions,
@@ -499,16 +647,42 @@ const completionProvider = vscode.languages.registerCompletionItemProvider(
                 ...importCompletions,
                 ...classCompletions
             ];
+
+            // Контекстные подсказки внутри класса (добавляем к общему списку)
+            const currentClass = analysis.classes.find(
+                c => position.line > c.startLine && position.line < c.endLine
+            );
+
+            if (currentClass) {
+                const specialMethodCompletions = Object.entries(specialClassMethods).map(([name, data]) => {
+                    const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Method);
+                    item.detail = data.detail;
+                    item.documentation = new vscode.MarkdownString(data.documentation);
+                    item.insertText = new vscode.SnippetString(data.snippet);
+                    return item;
+                });
+                allCompletions.push(...specialMethodCompletions);
+            }
+
+            return allCompletions;
         }
     },
     '.' // Триггер для автодополнения
 );
 
+function createMethodCompletionItem(method: AnalyzedFunction): vscode.CompletionItem {
+    const item = new vscode.CompletionItem(method.name, vscode.CompletionItemKind.Method);
+    item.detail = method.detail;
+    item.documentation = new vscode.MarkdownString(method.documentation);
+    item.insertText = new vscode.SnippetString(method.snippet.value.replace(/\(.*\)/, '($0)')); // Очищаем параметры для простого вызова
+    return item;
+}
+
 // --- ПРОВАЙДЕР ИНФОРМАЦИИ ПРИ НАВЕДЕНИИ (HOVER) ---
 const hoverProvider = vscode.languages.registerHoverProvider(
     'dark',
     {
-        provideHover(document, position, token) {
+        async provideHover(document, position, token) {
             const range = document.getWordRangeAtPosition(position);
             if (!range) { return; }
             const word = document.getText(range);
@@ -518,6 +692,37 @@ const hoverProvider = vscode.languages.registerHoverProvider(
             const memberAccessRegex = new RegExp(`([a-zA-Z_]\\w*)\\.${word}\\b`);
             const match = lineText.match(memberAccessRegex);
             const analysis = getAnalyzedDocument(document);
+
+            // 0. Проверка на импорт через `from ... use ...`
+            const isUsedImport = analysis.usedImports.some(imp => imp.name === word);
+            if (isUsedImport) {
+                // Найдем строку, где этот импорт определен
+                const fromUseRegex = /^\s*from\s*"((?:\\.|[^"\\])*)"\s+use\s+(.*)/;
+                for (let i = 0; i < document.lineCount; i++) {
+                    const line = document.lineAt(i).text;
+                    const fromUseMatch = line.match(fromUseRegex);
+                    if (fromUseMatch) {
+                        const importedNames = fromUseMatch[2].split(',').map(n => n.trim());
+                        if (importedNames.includes(word)) {
+                            const moduleName = fromUseMatch[1];
+                            const currentDir = path.dirname(document.uri.fsPath);
+                            const modulePath = path.resolve(currentDir, `${moduleName}.dark`);
+                            try {
+                                const moduleUri = vscode.Uri.file(modulePath);
+                                const moduleDoc = await vscode.workspace.openTextDocument(moduleUri);
+                                const moduleAnalysis = analyzeDocument(moduleDoc);
+                                
+                                const funcInfo = moduleAnalysis.functions.find(f => f.name === word);
+                                if (funcInfo) {
+                                    return new vscode.Hover(new vscode.MarkdownString().appendCodeblock(funcInfo.detail, 'dark').appendMarkdown(`---\n${funcInfo.documentation}`), range);
+                                }
+                                // Можно добавить аналогичный поиск для глобальных переменных и классов, если нужно
+                            } catch (error) { /* Файл не найден или не удалось проанализировать, молча выходим */ }
+                            break; // Нашли, выходим из цикла
+                        }
+                    }
+                }
+            }
 
             if (match) {
                 const objectName = match[1];
@@ -608,7 +813,7 @@ const tokenModifiers: string[] = [];
 const legend = new vscode.SemanticTokensLegend(tokenTypes, tokenModifiers);
 
 const semanticTokensProvider: vscode.DocumentSemanticTokensProvider = {
-    provideDocumentSemanticTokens(document: vscode.TextDocument): vscode.ProviderResult<vscode.SemanticTokens> {
+    async provideDocumentSemanticTokens(document: vscode.TextDocument): Promise<vscode.SemanticTokens> {
         // Получаем проанализированную структуру документа
         const analysis = getAnalyzedDocument(document);
         const builder = new vscode.SemanticTokensBuilder(legend);
@@ -617,6 +822,7 @@ const semanticTokensProvider: vscode.DocumentSemanticTokensProvider = {
         const functionNames = new Set(analysis.functions.map(f => f.name));
         const classNames = new Set(analysis.classes.map(c => c.name));
         const importNames = new Set(analysis.imports.map(i => i.name));
+        const usedImportNames = new Set(analysis.usedImports.map(i => i.name));
 
         const tokenMap = {
             import: tokenTypes.indexOf('namespace'),
@@ -632,6 +838,40 @@ const semanticTokensProvider: vscode.DocumentSemanticTokensProvider = {
         let inMultiLineString: '"""' | "'''" | null = null;
 
         for (let i = 0; i < document.lineCount; i++) {
+            // --- Новая логика для подсветки `from ... use ...` ---
+            const fromUseRegex = /^\s*from\s*"((?:\\.|[^"\\])*)"\s+use\s+(.*)/;
+            const fromUseMatch = document.lineAt(i).text.match(fromUseRegex);
+            if (fromUseMatch) {
+                const moduleName = fromUseMatch[1];
+                const namesStr = fromUseMatch[2];
+                const currentDir = path.dirname(document.uri.fsPath);
+                const modulePath = path.resolve(currentDir, `${moduleName}.dark`);
+
+                try {
+                    const moduleUri = vscode.Uri.file(modulePath);
+                    const moduleDoc = await vscode.workspace.openTextDocument(moduleUri);
+                    const moduleAnalysis = analyzeDocument(moduleDoc);
+
+                    const moduleFunctionNames = new Set(moduleAnalysis.functions.map(f => f.name));
+                    const moduleGlobalNames = new Set(moduleAnalysis.globals.map(g => g.name));
+
+                    const nameRegex = /[a-zA-Z_]\w*/g;
+                    let nameMatch;
+                    while ((nameMatch = nameRegex.exec(namesStr)) !== null) {
+                        const name = nameMatch[0];
+                        const nameIndex = fromUseMatch[0].indexOf(namesStr) + nameMatch.index;
+                        if (moduleFunctionNames.has(name)) {
+                            builder.push(i, nameIndex, name.length, tokenMap.function, 0);
+                        } else if (moduleGlobalNames.has(name)) {
+                            builder.push(i, nameIndex, name.length, tokenMap.variable, 0);
+                        }
+                    }
+                } catch (e) {
+                    // Не удалось проанализировать модуль, ничего страшного, просто не будет подсветки
+                }
+            }
+            // --- Конец новой логики ---
+
             const line = document.lineAt(i);
             const currentFunction = analysis.functions.find(f => i >= f.startLine && i <= f.endLine);
             const currentClass = analysis.classes.find(c => i >= c.startLine && i <= c.endLine);
@@ -698,31 +938,37 @@ const semanticTokensProvider: vscode.DocumentSemanticTokensProvider = {
                 const index = match.index;
                 let tokenType = -1;
 
-                // Проверяем, является ли слово именем класса
-                if (classNames.has(word)) {
-                    tokenType = tokenMap.class;
-                } else if (paramNames.has(word)) {
+                // Сначала проверяем локальный контекст (параметры, локальные переменные, методы)
+                if (paramNames.has(word)) {
                     tokenType = tokenMap.parameter;
                 } else if (localNames.has(word)) {
                     tokenType = tokenMap.local;
-                } else if (globalNames.has(word)) {
+                } else if (currentClass && currentClass.methods.some(m => m.name === word)) {
+                    const lineTrim = line.text.trim();
+                    if (lineTrim.startsWith(`function ${word}`)) {
+                        tokenType = tokenMap.method;
+                    }
+                }
+
+                // Если в локальном контексте не найдено, проверяем глобальный
+                if (tokenType === -1) {
+                    if (classNames.has(word)) {
+                    tokenType = tokenMap.class;
+                    } else if (globalNames.has(word)) {
                     tokenType = tokenMap.global;
                 } else if (functionNames.has(word)) {
                     tokenType = tokenMap.function; // Standalone function
                 } else if (importNames.has(word)) {
                     tokenType = tokenMap.import;
-                }
-
-                // Проверяем, является ли слово методом
-                if (tokenType === -1 && currentClass) {
-                    const isMethod = currentClass.methods.some(m => m.name === word);
-                    if (isMethod) {
-                        // Проверяем, это определение метода или вызов
-                        const lineTrim = line.text.trim();
-                        if (lineTrim.startsWith(`function ${word}`) || lineTrim.startsWith(`async function ${word}`)) {
-                            tokenType = tokenMap.method;
-                        }
+                } else if (usedImportNames.has(word)) {
+                    // Если это импортированное имя, проверим, вызывается ли оно как функция
+                    const textAfterWord = lineTextForAnalysis.substring(index + word.length);
+                    if (/^\s*\w*\(/.test(textAfterWord)) { // \w* для поддержки цепочек вызовов типа a()()
+                        tokenType = tokenMap.function;
+                    } else {
+                        tokenType = tokenMap.variable; // Иначе это переменная (например, PI)
                     }
+                }
                 }
 
                 if (tokenType !== -1) {

@@ -76,7 +76,26 @@
 				},
 				{
 					"name": "keyword.control.import.dark",
-					"match": "\\b(import)\\b"
+					"match": "\\b(import)\\b" 
+				},
+				{
+					"comment": "from <file> use <vars>",
+					"begin": "(?<=^|\\s)(from)\\b",
+					"beginCaptures": {
+						"1": { "name": "keyword.control.import.dark" }
+					},
+					"end": "$",
+					"patterns": [
+						{
+							"name": "string.quoted.double.dark",
+							"begin": "\"",
+							"end": "\""
+						},
+						{
+							"name": "keyword.control.import.dark",
+							"match": "\\b(use)\\b"
+						}
+					]
 				},
 				{
 					"name": "keyword.operator.logical.dark",
@@ -90,10 +109,6 @@
 		},
 		"entities": {
 			"patterns": [
-				{
-					"name": "support.function.builtin.dark",
-					"match": "\\b(print|println|input|to_int|to_str|to_float|type|len|find)\\b"
-				},
 				{
 					"comment": "Class definition: class ClassName(Parent) do",
 					"begin": "(?<=^|\\s)(class)\\s+([a-zA-Z_]\\w*)",
@@ -208,9 +223,20 @@
 					"match": "\\b([a-zA-Z_]\\w*)\\s*(?=\\()"
 				},
 				{
+					"name": "support.function.builtin.dark",
+					"match": "\\b(print|println|input|to_int|to_str|to_float|type|len|find)\\b"
+				},
+				{
 					"comment": "Handles standalone variables that are not part of a call or access",
 					"name": "variable.other.dark",
-					"match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\b(?!\\s*[\\.\\(])"
+					"match": "(?<!\\bfunction\\s+)\\b([a-zA-Z_][a-zA-Z0-9_]*)\\b(?!\\s*[\\.\\(])"
+				},
+				{
+					"comment": "Function name in definition (fallback for semantic)",
+					"match": "(?<=\\bfunction\\s+)([a-zA-Z_]\\w*)",
+					"captures": {
+						"1": { "name": "entity.name.function.dark" }
+					}
 				}
 			]
 		},

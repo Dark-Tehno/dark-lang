@@ -92,7 +92,8 @@ export const standardLibrary = {
         'create_entry': { detail: 'gui.create_entry()', documentation: 'Создает поле для ввода текста.', snippet: 'create_entry()' },
         'get_entry_value': { detail: 'gui.get_entry_value()', documentation: 'Возвращает текст, введенный в поле ввода.', snippet: 'get_entry_value()' },
         'set_label_text': { detail: 'gui.set_label_text(text)', documentation: 'Изменяет текст метки.', snippet: 'set_label_text("${1:text}")' },
-        'run_app': { detail: 'gui.run_app()', documentation: 'Запускает главный цикл обработки событий GUI. Эта функция должна вызываться в конце скрипта.', snippet: 'run_app()' }    },
+        'run_app': { detail: 'gui.run_app()', documentation: 'Запускает главный цикл обработки событий GUI. Эта функция должна вызываться в конце скрипта.', snippet: 'run_app()' },
+        'stop': { detail: 'gui.stop()', documentation: 'Завершает главный цикл обработки событий GUI.', snippet: 'stop()' }    },
     'color': {
         'rgb': { detail: 'color.rgb(r, g, b, text)', documentation: 'Возвращает текст, окрашенный в указанный RGB цвет.', snippet: 'rgb(${1:255}, ${2:100}, ${3:150}, "${4:text}")' },
         'rgba': { detail: 'color.rgba(r, g, b, a, text)', documentation: 'Возвращает текст, окрашенный в указанный RGBA цвет.', snippet: 'rgba(${1:255}, ${2:100}, ${3:150}, ${4:255}, "${5:text}")' },

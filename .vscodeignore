@@ -1,0 +1,7 @@
+src/
+out/**/*.map
+tsconfig.json
+.gitignore
+
+# It's good practice to also ignore node_modules, though vsce often does this by default.
+node_modules/

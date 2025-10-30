@@ -1,9 +1,14 @@
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
 
 // Мы будем управлять одним экземпляром терминала для всех запусков
 let darkTerminal: vscode.Terminal | undefined;
+
+// --- Новые глобальные переменные для управления denv ---
+let denvStatusBarItem: vscode.StatusBarItem;
+const DENV_CONFIG_FILE = 'denv.cfg';
 
 // Эта функция находит существующий терминал или создает новый
 function getDarkTerminal(): vscode.Terminal {
@@ -12,6 +17,72 @@ function getDarkTerminal(): vscode.Terminal {
     }
     darkTerminal = vscode.window.createTerminal(`Dark Runner`);
     return darkTerminal;
+}
+
+// --- Новые функции для работы с denv ---
+
+/**
+ * Находит все denv окружения в рабочей области.
+ */
+async function findDenvs(): Promise<vscode.Uri[]> {
+    const denvUris: vscode.Uri[] = [];
+    if (!vscode.workspace.workspaceFolders) {
+        return [];
+    }
+
+    for (const folder of vscode.workspace.workspaceFolders) {
+        const files = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, `**/${DENV_CONFIG_FILE}`), '**/node_modules/**', 100);
+        for (const file of files) {
+            denvUris.push(vscode.Uri.joinPath(file, '..'));
+        }
+    }
+    return denvUris;
+}
+
+/**
+ * Обновляет текст в строке состояния, отображая выбранное окружение.
+ */
+function updateStatusBar(context: vscode.ExtensionContext) {
+    const selectedDenvPath = context.workspaceState.get<string>('selectedDenvPath');
+    if (selectedDenvPath) {
+        const denvName = path.basename(selectedDenvPath);
+        denvStatusBarItem.text = `$(folder-active) Dark: ${denvName}`;
+        denvStatusBarItem.tooltip = `Активное окружение Dark: ${selectedDenvPath}`;
+    } else {
+        denvStatusBarItem.text = `$(error) Dark: Выбрать окружение`;
+        denvStatusBarItem.tooltip = 'Окружение Dark (denv) не выбрано';
+    }
+    denvStatusBarItem.show();
+}
+
+/**
+ * Регистрирует команду для выбора denv.
+ */
+function registerDenvSelectorCommand(context: vscode.ExtensionContext) {
+    const command = vscode.commands.registerCommand('dark.selectDenv', async () => {
+        const denvs = await findDenvs();
+        if (denvs.length === 0) {
+            vscode.window.showInformationMessage('Окружения Dark (denv) не найдены в рабочей области.');
+            return;
+        }
+
+        const quickPickItems = denvs.map(uri => ({
+            label: path.basename(uri.fsPath),
+            description: uri.fsPath,
+            uri: uri
+        }));
+
+        const selected = await vscode.window.showQuickPick(quickPickItems, {
+            placeHolder: 'Выберите окружение Dark (denv)'
+        });
+
+        if (selected) {
+            await context.workspaceState.update('selectedDenvPath', selected.uri.fsPath);
+            updateStatusBar(context);
+            vscode.window.showInformationMessage(`Окружение Dark '${selected.label}' выбрано.`);
+        }
+    });
+    context.subscriptions.push(command);
 }
 
 // --- НОВЫЙ, УЛУЧШЕННЫЙ АНАЛИЗАТОР КОДА ---
@@ -986,12 +1057,21 @@ const semanticTokensProvider: vscode.DocumentSemanticTokensProvider = {
  * @param collection Коллекция диагностики для обновления.
  */
 function updateDiagnostics(document: vscode.TextDocument, collection: vscode.DiagnosticCollection) {
+    const context = (global as any).extensionContext as vscode.ExtensionContext;
     if (document.languageId !== 'dark') {
         return;
     }
 
-    const config = vscode.workspace.getConfiguration('dark');
-    const executorPath = config.get<string>('executorPath');
+    const selectedDenvPath = context.workspaceState.get<string>('selectedDenvPath');
+    let executorPath: string | null = getExecutorCommand(context);
+    const env = { ...process.env };
+
+    if (selectedDenvPath) {
+        const platform = process.platform;
+        const executableName = platform === 'win32' ? 'dark.exe' : 'dark';
+        executorPath = path.join(selectedDenvPath, 'bin', executableName);
+        env['DARK_ENV'] = selectedDenvPath;
+    }
 
     if (!executorPath) {
         // Если путь не настроен, молча выходим. Можно добавить однократное предупреждение.
@@ -1042,21 +1122,28 @@ function updateDiagnostics(document: vscode.TextDocument, collection: vscode.Dia
  * На других системах требуется явное указание пути.
  * @returns {string | null} Команда или путь к исполняемому файлу, или null, если не найден.
  */
-function getExecutorCommand(): string | null {
+function getExecutorCommand(context: vscode.ExtensionContext): string | null {
+    // 1. Приоритет у выбранного denv
+    const selectedDenvPath = context.workspaceState.get<string>('selectedDenvPath');
+    if (selectedDenvPath) {
+        const platform = process.platform;
+        const executableName = platform === 'win32' ? 'dark.exe' : 'dark';
+        return path.join(selectedDenvPath, 'bin', executableName);
+    }
+
+    // 2. Если denv не выбран, смотрим глобальные настройки
     const config = vscode.workspace.getConfiguration('dark');
     const executorPath = config.get<string>('executorPath');
-
-    // 1. Если путь указан явно, используем его.
     if (executorPath) {
         return executorPath;
     }
 
-    // 2. Если путь не указан и система - Linux, предполагаем, что 'dark' есть в PATH.
+    // 3. Если путь не указан и система - Linux, предполагаем, что 'dark' есть в PATH.
     if (process.platform === 'linux') {
         return 'dark';
     }
 
-    // 3. Для других систем путь обязателен.
+    // 4. Для других систем путь обязателен.
     return null;
 }
 
@@ -1073,6 +1160,14 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }));
 
+    // --- Инициализация UI для denv ---
+    (global as any).extensionContext = context; // Сохраняем контекст глобально для доступа
+    denvStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    denvStatusBarItem.command = 'dark.selectDenv';
+    context.subscriptions.push(denvStatusBarItem);
+    registerDenvSelectorCommand(context);
+    updateStatusBar(context);
+
     const runCommand = vscode.commands.registerCommand('dark.run', () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
@@ -1083,17 +1178,29 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage('This command can only be used with .dark files.');
             return;
         }
-        const config = vscode.workspace.getConfiguration('dark');
-        const executorCommand = getExecutorCommand();
+
+        const executorCommand = getExecutorCommand(context); // Получаем команду с учетом denv
         if (!executorCommand) {
             vscode.window.showErrorMessage(
-                'Path to Dark executor is not set. Please set "dark.executorPath" in your settings.'
+                'Интерпретатор Dark не найден. Выберите окружение (denv) или укажите "dark.executorPath" в настройках.'
             );
             return;
         }
-
         const filePath = editor.document.uri.fsPath;
         const terminal = getDarkTerminal();
+        const selectedDenvPath = context.workspaceState.get<string>('selectedDenvPath');
+
+        // Устанавливаем переменную окружения ПЕРЕД запуском команды
+        if (selectedDenvPath) {
+            if (process.platform === 'win32') {
+                // Для cmd, PowerShell и bash-подобных оболочек (Git Bash) на Windows
+                terminal.sendText(`source "${selectedDenvPath}/bin/activate"`, true);
+            } else {
+                // Для bash/zsh/etc.
+                terminal.sendText(`source "${selectedDenvPath}/bin/activate"`, true);
+            }
+        }
+
         terminal.show();
         const command = `"${executorCommand}" "${filePath}"`;
         terminal.sendText(command);
@@ -1118,7 +1225,7 @@ export function activate(context: vscode.ExtensionContext) {
     }, 500); // Задержка в 500 мс
 
     if (vscode.window.activeTextEditor) {
-        updateDiagnostics(vscode.window.activeTextEditor.document, diagnosticCollection);
+        debouncedUpdateDiagnostics(vscode.window.activeTextEditor.document);
     }
 
     context.subscriptions.push(

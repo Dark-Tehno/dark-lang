@@ -1,8 +1,8 @@
 {
   "name": "dark-lang",
-  "displayName": "Dark Programming Language",
-  "description": "Syntax highlighting and runner for the Dark language.",
-  "version": "0.3.2",
+  "displayName": "The Dark Programming Language",
+  "description": "Полная поддержка языка программирования Dark, включая подсветку синтаксиса, автодополнение, проверку ошибок, запуск кода и поддержку пакетного менеджера.",
+  "version": "0.3.6",
   "publisher": "vsp210",
   "icon": "icon.png",
   "license": "MIT",
@@ -31,6 +31,10 @@
         "command": "dark.run",
         "title": "Run Dark File",
         "icon": "$(play)"
+      },
+      {
+        "command": "dark.selectDenv",
+        "title": "Dark: Выбрать окружение (denv)"
       }
     ],
     "menus": {

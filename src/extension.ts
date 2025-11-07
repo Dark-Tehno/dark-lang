@@ -3,20 +3,25 @@ import { execFile } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 
+import { builtInMethods, standardLibrary, builtInFunctions } from './language-data';
 // Мы будем управлять одним экземпляром терминала для всех запусков
 let darkTerminal: vscode.Terminal | undefined;
 
 // --- Новые глобальные переменные для управления denv ---
-let denvStatusBarItem: vscode.StatusBarItem;
+let denvStatusBarItem: vscode.StatusBarItem; // Для выбора окружения
+let dpmInstallStatusBarItem: vscode.StatusBarItem; // Кнопка для dpm install
+let dpmListStatusBarItem: vscode.StatusBarItem; // Кнопка для dpm list
+
 const DENV_CONFIG_FILE = 'denv.cfg';
 
-// Эта функция находит существующий терминал или создает новый
-function getDarkTerminal(): vscode.Terminal {
+// Эта функция находит существующий терминал или создает новый.
+// Возвращает объект с терминалом и флагом, указывающим, был ли он создан заново.
+function getDarkTerminal(): { terminal: vscode.Terminal, isNew: boolean } {
     if (darkTerminal && darkTerminal.exitStatus === undefined) {
-        return darkTerminal;
+        return { terminal: darkTerminal, isNew: false };
     }
     darkTerminal = vscode.window.createTerminal(`Dark Runner`);
-    return darkTerminal;
+    return { terminal: darkTerminal, isNew: true };
 }
 
 // --- Новые функции для работы с denv ---
@@ -46,12 +51,21 @@ function updateStatusBar(context: vscode.ExtensionContext) {
     const selectedDenvPath = context.workspaceState.get<string>('selectedDenvPath');
     if (selectedDenvPath) {
         const denvName = path.basename(selectedDenvPath);
-        denvStatusBarItem.text = `$(folder-active) Dark: ${denvName}`;
+        denvStatusBarItem.text = `$(notebook) Dark: ${denvName}`;
         denvStatusBarItem.tooltip = `Активное окружение Dark: ${selectedDenvPath}`;
+    } else if (getExecutorCommand(context)) {
+        // Если denv не выбран, но есть глобальный интерпретатор
+        denvStatusBarItem.text = `$(globe) Dark: (глобальный)`;
+        denvStatusBarItem.tooltip = 'Используется глобальный интерпретатор Dark';
     } else {
-        denvStatusBarItem.text = `$(error) Dark: Выбрать окружение`;
+        // Если не найдено ни то, ни другое
+        denvStatusBarItem.text = `$(error) Dark: Не найден интерпретатор`;
         denvStatusBarItem.tooltip = 'Окружение Dark (denv) не выбрано';
     }
+    // Показываем кнопки dpm только если есть интерпретатор
+    const hasInterpreter = !!getExecutorCommand(context);
+    dpmInstallStatusBarItem.text = `$(cloud-download)`;
+    dpmListStatusBarItem.text = `$(list-selection)`;
     denvStatusBarItem.show();
 }
 
@@ -61,28 +75,246 @@ function updateStatusBar(context: vscode.ExtensionContext) {
 function registerDenvSelectorCommand(context: vscode.ExtensionContext) {
     const command = vscode.commands.registerCommand('dark.selectDenv', async () => {
         const denvs = await findDenvs();
-        if (denvs.length === 0) {
+        const selectedDenvPath = context.workspaceState.get<string>('selectedDenvPath');
+
+        if (denvs.length === 0 && !selectedDenvPath) {
             vscode.window.showInformationMessage('Окружения Dark (denv) не найдены в рабочей области.');
             return;
         }
 
-        const quickPickItems = denvs.map(uri => ({
-            label: path.basename(uri.fsPath),
-            description: uri.fsPath,
-            uri: uri
-        }));
+        const quickPickItems: (vscode.QuickPickItem & { uri?: vscode.Uri, name?: string })[] = denvs.map(uri => {
+            const name = path.basename(uri.fsPath);
+            return {
+                label: `$(folder) ${name}`,
+                description: uri.fsPath,
+                uri: uri,
+                name: name
+            };
+        });
+
+        // Добавляем опцию для отключения окружения
+        quickPickItems.unshift({
+            label: `$(circle-slash) Отключить окружение`,
+            description: 'Использовать глобальный интерпретатор Dark (если он настроен)',
+            uri: undefined // Используем undefined как признак отключения
+        });
 
         const selected = await vscode.window.showQuickPick(quickPickItems, {
             placeHolder: 'Выберите окружение Dark (denv)'
         });
 
-        if (selected) {
+        // Если пользователь нажал Escape
+        if (!selected) {
+            return;
+        }
+
+        if (selected.uri) { // Выбрано конкретное окружение
             await context.workspaceState.update('selectedDenvPath', selected.uri.fsPath);
             updateStatusBar(context);
-            vscode.window.showInformationMessage(`Окружение Dark '${selected.label}' выбрано.`);
+            vscode.commands.executeCommand('dark.dpm.refresh'); // Обновляем наше новое окно
+            vscode.window.showInformationMessage(`Окружение Dark '${selected.name}' выбрано.`);
+        } else { // Выбрана опция "Отключить"
+            await context.workspaceState.update('selectedDenvPath', undefined);
+            updateStatusBar(context);
+            vscode.commands.executeCommand('dark.dpm.refresh'); // Обновляем наше новое окно
+            vscode.window.showInformationMessage(`Окружение Dark отключено. Используется глобальный интерпретатор.`);
         }
     });
     context.subscriptions.push(command);
+}
+
+// --- НОВЫЕ КЛАССЫ ДЛЯ ПРЕДСТАВЛЕНИЯ ЗАВИСИМОСТЕЙ (DPM) ---
+
+/**
+ * Представляет один элемент в нашем дереве зависимостей (т.е. один пакет).
+ */
+class Dependency extends vscode.TreeItem {
+    constructor(
+        public readonly label: string,
+        public readonly collapsibleState: vscode.TreeItemCollapsibleState
+    ) {
+        super(label, collapsibleState);
+        this.tooltip = `${this.label}`;
+        this.description = 'установленный пакет';
+        this.contextValue = 'dependency'; // Это ключ для отображения контекстного меню
+        this.command = {
+            command: 'dark.dpm.openPackageDocs',
+            title: 'Открыть документацию пакета',
+            arguments: [this] // Передаем сам объект Dependency в команду
+        };
+    }
+
+    // Иконка для элемента
+    iconPath = new vscode.ThemeIcon('package');
+}
+
+/**
+ * Поставщик данных для нашего дерева зависимостей.
+ */
+class DpmDependenciesProvider implements vscode.TreeDataProvider<Dependency> {
+    private _onDidChangeTreeData: vscode.EventEmitter<Dependency | undefined | null | void> = new vscode.EventEmitter<Dependency | undefined | null | void>();
+    readonly onDidChangeTreeData: vscode.Event<Dependency | undefined | null | void> = this._onDidChangeTreeData.event;
+
+    constructor(private context: vscode.ExtensionContext) {}
+
+    refresh(): void {
+        this._onDidChangeTreeData.fire();
+    }
+
+    getTreeItem(element: Dependency): vscode.TreeItem {
+        return element;
+    }
+
+    async getChildren(element?: Dependency): Promise<Dependency[]> {
+        // Если element есть, значит мы ищем дочерние элементы пакета.
+        // В нашем случае у пакетов нет дочерних элементов, поэтому возвращаем пустой массив.
+        if (element) {
+            return [];
+        }
+
+        const selectedDenvPath = this.context.workspaceState.get<string>('selectedDenvPath');
+        if (!selectedDenvPath) {
+            const noDenvItem = new vscode.TreeItem("Выберите окружение (denv)");
+            noDenvItem.iconPath = new vscode.ThemeIcon('info');
+            return [noDenvItem as Dependency];
+        }
+
+        const extensionsUri = vscode.Uri.joinPath(vscode.Uri.file(selectedDenvPath), 'dark_extensions');
+
+        try {
+            const entries = await vscode.workspace.fs.readDirectory(extensionsUri);
+            const packages = entries
+                .filter(([name, type]) => type === vscode.FileType.Directory)
+                .map(([name, type]) => new Dependency(name, vscode.TreeItemCollapsibleState.None));
+
+            if (packages.length === 0) {
+                const noPackagesItem = new vscode.TreeItem("Пакеты не установлены");
+                noPackagesItem.iconPath = new vscode.ThemeIcon('info');
+                return [noPackagesItem as Dependency];
+            }
+
+            return packages;
+        } catch (error) {
+            // Скорее всего, директория dark_extensions не найдена
+            const noPackagesItem = new vscode.TreeItem("Пакеты не установлены");
+            noPackagesItem.iconPath = new vscode.ThemeIcon('info');
+            return [noPackagesItem as Dependency];
+        }
+    }
+}
+
+
+// --- НОВЫЕ ФУНКЦИИ ДЛЯ УПРАВЛЕНИЯ DPM ---
+
+/**
+ * Открывает файл D-READ.md для указанного пакета.
+ * @param dependency Объект Dependency, представляющий пакет.
+ * @param context Контекст расширения.
+ */
+async function openPackageDocs(dependency: Dependency, context: vscode.ExtensionContext) {
+    const selectedDenvPath = context.workspaceState.get<string>('selectedDenvPath');
+    if (!selectedDenvPath) {
+        vscode.window.showWarningMessage('Сначала выберите окружение Dark (denv).');
+        return;
+    }
+
+    const packageName = dependency.label;
+    const docPath = path.join(selectedDenvPath, 'dark_extensions', packageName, 'D-READ.md');
+    const docUri = vscode.Uri.file(docPath);
+
+    try {
+        // Проверяем, существует ли файл
+        await vscode.workspace.fs.stat(docUri);
+
+        // Открываем ТОЛЬКО предпросмотр Markdown, не открывая сам файл для редактирования.
+        // Команда 'markdown.showPreview' принимает URI файла в качестве аргумента.
+        await vscode.commands.executeCommand('markdown.showPreview', docUri);
+    } catch (error: any) {
+        if (error instanceof vscode.FileSystemError && error.code === 'FileNotFound') {
+            vscode.window.showInformationMessage(`Документация 'D-READ.md' для пакета '${packageName}' не найдена.`);
+        } else {
+            vscode.window.showErrorMessage(`Ошибка при открытии документации для пакета '${packageName}': ${error.message || error}`);
+        }
+    }
+}
+
+/**
+ * Регистрирует команды для работы с пакетным менеджером dpm.
+ * @param context Контекст расширения.
+ */
+function registerDpmCommands(context: vscode.ExtensionContext) {
+    // Общая функция для выполнения команд dpm
+    const runDpmCommand = async (dpmCommand: string, needsArgs: boolean, prompt: string, placeHolder: string) => {
+        const executorCommand = getExecutorCommand(context);
+        if (!executorCommand) {
+            vscode.window.showErrorMessage(
+                'Интерпретатор Dark не найден. Выберите окружение (denv) или укажите "dark.executorPath" в настройках.'
+            );
+            return;
+        }
+
+        let commandArgs = '';
+        if (needsArgs) {
+            const input = await vscode.window.showInputBox({ prompt, placeHolder });
+            // Если пользователь нажал Escape, отменяем операцию
+            if (input === undefined) {
+                return;
+            }
+            commandArgs = input; // Может быть пустой строкой для `install`
+        } else {
+            // Если needsArgs равно false, placeHolder содержит имя пакета
+            commandArgs = placeHolder;
+        }
+
+        const { terminal, isNew } = getDarkTerminal();
+        const selectedDenvPath = context.workspaceState.get<string>('selectedDenvPath');
+
+        // Активируем окружение, если терминал новый
+        if (isNew && selectedDenvPath) {
+            terminal.sendText(`source "${selectedDenvPath}/bin/activate"`, true);
+        }
+
+        terminal.show();
+        // Формируем и отправляем команду
+        const fullCommand = `"${executorCommand}" --dpm ${dpmCommand} ${commandArgs}`;
+        terminal.sendText(fullCommand, true); // Добавляем true для выполнения
+
+        // Ждем некоторое время и обновляем список пакетов
+        // Это простой способ, в идеале нужно отслеживать завершение команды
+        setTimeout(() => {
+            if (dpmCommand === 'install' || dpmCommand === 'uninstall' || dpmCommand === 'update') {
+                vscode.commands.executeCommand('dark.dpm.refresh');
+            }
+        }, 3000); // Задержка в 3 секунды
+    };
+
+    // Регистрируем все команды dpm
+    context.subscriptions.push(
+        vscode.commands.registerCommand('dark.dpm.install', () => runDpmCommand('install', true, 
+            'Введите имена пакетов через пробел (оставьте пустым для установки из requirements.txt)', 'например, requests color')),
+        vscode.commands.registerCommand('dark.dpm.uninstall', () => runDpmCommand('uninstall', true, 
+            'Введите имена пакетов для удаления через пробел', 'например, requests')),
+        vscode.commands.registerCommand('dark.dpm.update', () => runDpmCommand('update', true, 
+            'Введите имена пакетов для обновления через пробел', 'например, color')),
+        vscode.commands.registerCommand('dark.dpm.list', () => runDpmCommand('list', false, '', '')),
+        vscode.commands.registerCommand('dark.dpm.freeze', () => runDpmCommand('freeze', false, '', '')),
+        vscode.commands.registerCommand('dark.dpm.doctor', () => runDpmCommand('doctor', false, '', '')),
+
+        // Новые команды для контекстного меню
+        vscode.commands.registerCommand('dark.dpm.uninstall.fromView', (item: Dependency) => {
+            if (item && item.label) {
+                runDpmCommand('uninstall', false, '', item.label);
+            }
+        }),
+        vscode.commands.registerCommand('dark.dpm.update.fromView', (item: Dependency) => {
+            if (item && item.label) {
+                runDpmCommand('update', false, '', item.label);
+            }
+        }),
+        // Новая команда для открытия документации пакета
+        vscode.commands.registerCommand('dark.dpm.openPackageDocs', (item: Dependency) => openPackageDocs(item, context))
+
+    );
 }
 
 // --- НОВЫЙ, УЛУЧШЕННЫЙ АНАЛИЗАТОР КОДА ---
@@ -339,138 +571,6 @@ function getAnalyzedDocument(document: vscode.TextDocument): AnalyzedDocument {
     lastAnalyzedDocVersion = document.version;
     return lastAnalysis;
 }
-
-const builtInMethods = {
-    'string': {
-        'len': { detail: 'string.len()', documentation: 'Возвращает количество символов в строке.', snippet: 'len()' },
-        'upper': { detail: 'string.upper()', documentation: 'Возвращает новую строку в верхнем регистре.', snippet: 'upper()' },
-        'lower': { detail: 'string.lower()', documentation: 'Возвращает новую строку в нижнем регистре.', snippet: 'lower()' },
-        'strip': { detail: 'string.strip()', documentation: 'Удаляет пробельные символы в начале и в конце строки.', snippet: 'strip()' },
-        'startswith': { detail: 'string.startswith(prefix)', documentation: 'Возвращает `true`, если строка начинается с `prefix`.', snippet: 'startswith("${1:prefix}")' },
-        'endswith': { detail: 'string.endswith(suffix)', documentation: 'Возвращает `true`, если строка заканчивается на `suffix`.', snippet: 'endswith("${1:suffix}")' },
-        'find': { detail: 'string.find(substring)', documentation: 'Ищет подстроку и возвращает индекс первого вхождения или -1, если не найдено.', snippet: 'find("${1:substring}")' },
-    },
-    'list': {
-        'len': { detail: 'list.len()', documentation: 'Возвращает количество элементов в списке.', snippet: 'len()' },
-        'append': { detail: 'list.append(item)', documentation: 'Добавляет элемент в конец списка.', snippet: 'append(${1:item})' },
-        'pop': { detail: 'list.pop()', documentation: 'Удаляет и возвращает последний элемент списка.', snippet: 'pop()' },
-    },
-    'dict': {
-        'len': { detail: 'dict.len()', documentation: 'Возвращает количество пар ключ-значение в словаре.', snippet: 'len()' },
-        'keys': { detail: 'dict.keys()', documentation: 'Возвращает список всех ключей в словаре.', snippet: 'keys()' },
-    }
-};
-
-const standardLibrary = {
-    'vsp210': {
-        'history': { detail: 'vsp210.history()', documentation: 'Возвращает исторю создателя языка Dark.', snippet: 'history()' },
-        'philosophy': { detail: 'vsp210.philosophy()', documentation: 'Возвращает философию языка Dark.(Секретная функция)', snippet: 'philosophy()' },
-        'calculator': { detail: 'vsp210.calculator()', documentation: 'Запускает калькулятор написаный для примера.', snippet: 'calculator()' },
-        'version': { detail: 'vsp210.version()', documentation: 'Возвращает версию языка Dark.', snippet: 'version()' },
-        'docs': { detail: 'vsp210.docs()', documentation: 'Отправляет пользователя на страницу документации языка Dark.', snippet: 'docs()' },
-        'telegram': { detail: 'vsp210.telegram()', documentation: 'Отправляет пользователя в телеграм канал создателя языка Dark.', snippet: 'telegram()' },
-    },
-    'http': {
-        'get': { detail: 'http.get(url)', documentation: 'Выполняет HTTP GET-запрос и возвращает словарь с `status_code`, `headers` и `body`.', snippet: 'get("${1:url}")' },
-    },
-    'os': {
-        'getcwd': { detail: 'os.getcwd()', documentation: 'Возвращает текущую рабочую директорию.', snippet: 'getcwd()' },
-        'path_exists': { detail: 'os.path_exists(path)', documentation: 'Проверяет, существует ли путь. Возвращает True или False.', snippet: 'path_exists("${1:path}")' },
-        'mkdir': { detail: 'os.mkdir(path)', documentation: 'Создает директорию.', snippet: 'mkdir("${1:path}")' },
-        'rmdir': { detail: 'os.rmdir(path)', documentation: 'Удаляет директорию.', snippet: 'rmdir("${1:path}")' },
-        'remove': { detail: 'os.remove(path)', documentation: 'Удаляет файл.', snippet: 'remove("${1:path}")' },
-        'rename': { detail: 'os.rename(old, new)', documentation: 'Переименовывает файл или директорию.', snippet: 'rename("${1:old}", "${2:new}")' },
-        'listdir': { detail: 'os.listdir(path)', documentation: 'Возвращает список содержимого директории.', snippet: 'listdir("${1:path}")' },
-        'getsize': { detail: 'os.getsize(path)', documentation: 'Возвращает размер файла.', snippet: 'getsize("${1:path}")' },
-        'isdir': { detail: 'os.isdir(path)', documentation: 'Проверяет, является ли путь директорией.', snippet: 'isdir("${1:path}")' },
-        'system': { detail: 'os.system(command)', documentation: 'Выполняет системную команду (например, "cls" или "clear").', snippet: 'system("${1:command}")' },
-        'exit': { detail: 'os.exit(code)', documentation: 'Завершает выполнение программы с указанным кодом выхода.', snippet: 'exit(${1:0})' },
-    },
-    'math': {
-        'sqrt': { detail: 'math.sqrt(number)', documentation: 'Вычисляет квадратный корень числа.', snippet: 'sqrt(${1:number})' },
-        'pow': { detail: 'math.pow(base, exp)', documentation: 'Вычисляет `base` в степени `exp`.', snippet: 'pow(${1:base}, ${2:exp})' },
-        'floor': { detail: 'math.floor(number)', documentation: 'Возвращает наибольшее целое число, меньшее или равное `number`.', snippet: 'floor(${1:number})' },
-        'ceil': { detail: 'math.ceil(number)', documentation: 'Возвращает наименьшее целое число, большее или равное `number`.', snippet: 'ceil(${1:number})' },
-        'pi': { detail: 'math.pi()', documentation: 'Возвращает значение числа PI.', snippet: 'pi()' },
-        'random': { detail: 'math.random()', documentation: 'Возвращает случайное число с плавающей точкой от 0.0 до 1.0.', snippet: 'random()' },
-        'random_int': { detail: 'math.random_int(min, max)', documentation: 'Возвращает случайное целое число в диапазоне от `min` до `max` включительно.', snippet: 'random_int(${1:min}, ${2:max})' },
-    },
-    'stdlib': {
-        'range': { detail: 'stdlib.range(start, stop)', documentation: 'Возвращает список чисел в диапазоне от `start` (включительно) до `stop` (не включительно).', snippet: 'range(${1:start}, ${2:stop})' },
-        'list_contains': { detail: 'stdlib.list_contains(list, item)', documentation: 'Проверяет, содержится ли `item` в `list`.', snippet: 'list_contains(${1:list}, ${2:item})' },
-        'list_join': { detail: 'stdlib.list_join(list, separator)', documentation: 'Объединяет элементы списка в строку с указанным разделителем.', snippet: 'list_join(${1:list}, "${2:separator}")' },
-        'dict_get': { detail: 'stdlib.dict_get(dict, key, default)', documentation: 'Получает значение из словаря по ключу, с возможностью указать значение по умолчанию.', snippet: 'dict_get(${1:dict}, ${2:key}, ${3:default})' },
-        'clamp': { detail: 'stdlib.clamp(value, min, max)', documentation: 'Ограничивает значение `value` между `min` и `max`.', snippet: 'clamp(${1:value}, ${2:min}, ${3:max})' },
-        'json_decode': { detail: 'stdlib.json_decode(json_string)', documentation: 'Преобразует строку в формате JSON в словарь или список.', snippet: 'json_decode(${1:json_string})' },
-        'read_file': { detail: 'stdlib.read_file(path)', documentation: 'Читает содержимое файла и возвращает его в виде строки.', snippet: 'read_file("${1:path}")' },
-        'write_file': { detail: 'stdlib.write_file(path, content)', documentation: 'Записывает строку `content` в файл по указанному пути `path`.', snippet: 'write_file("${1:path}", ${2:content})' },
-        'str_split': { detail: 'stdlib.str_split(string, separator)', documentation: 'Разделяет строку по указанному разделителю и возвращает список.', snippet: 'str_split(${1:string}, "${2:separator}")' },
-        'str_upper': { detail: 'stdlib.str_upper(string)', documentation: 'Преобразует строку в верхний регистр.', snippet: 'str_upper(${1:string})' },
-        'str_lower': { detail: 'stdlib.str_lower(string)', documentation: 'Преобразует строку в нижний регистр.', snippet: 'str_lower(${1:string})' },
-        'str_replace': { detail: 'stdlib.str_replace(string, old, new)', documentation: 'Заменяет все вхождения подстроки `old` на `new`.', snippet: 'str_replace(${1:string}, "${2:old}", "${3:new}")' },
-    },
-    'time': {
-        'time': { detail: 'time.time()', documentation: 'Возвращает текущее время в виде Unix timestamp (число секунд с 1 января 1970 года).', snippet: 'time()' },
-        'sleep': { detail: 'time.sleep(seconds)', documentation: 'Приостанавливает выполнение программы на указанное количество секунд.', snippet: 'sleep(${1:seconds})' },
-    },
-    'file': {
-        'open': { detail: 'file.open(path, mode)', documentation: 'Открывает файл. `mode` - это строка, например: "r" (чтение), "w" (запись), "a" (дозапись).', snippet: 'open("${1:path}", "${2:r}")' },
-        'read': { detail: 'file.read()', documentation: 'Читает все содержимое открытого файла и возвращает его как строку.', snippet: 'read()' },
-        'readline': { detail: 'file.readline()', documentation: 'Читает одну строку из открытого файла.', snippet: 'readline()' },
-        'readlines': { detail: 'file.readlines()', documentation: 'Читает все строки из файла и возвращает их в виде списка.', snippet: 'readlines()' },
-        'write': { detail: 'file.write(content)', documentation: 'Записывает строку `content` в открытый файл.', snippet: 'write(${1:content})' },
-        'close': { detail: 'file.close()', documentation: 'Закрывает ранее открытый файл.', snippet: 'close()' },
-    },
-    'gui': {
-        'create_window': { detail: 'gui.create_window(title, width, height)', documentation: 'Создает главное окно приложения с указанным заголовком и размерами.', snippet: 'create_window("${1:title}", ${2:width}, ${3:height})' },
-        'create_label': { detail: 'gui.create_label(text)', documentation: 'Создает и размещает текстовую метку в окне.', snippet: 'create_label("${1:text}")' },
-        'create_button': { detail: 'gui.create_button(text, command)', documentation: 'Создает кнопку. `command` - это имя функции (в виде строки), которая будет вызвана при нажатии.', snippet: 'create_button("${1:text}", "${2:command}")' },
-        'create_entry': { detail: 'gui.create_entry()', documentation: 'Создает поле для ввода текста.', snippet: 'create_entry()' },
-        'get_entry_value': { detail: 'gui.get_entry_value()', documentation: 'Возвращает текст, введенный в поле ввода.', snippet: 'get_entry_value()' },
-        'set_label_text': { detail: 'gui.set_label_text(text)', documentation: 'Изменяет текст метки.', snippet: 'set_label_text("${1:text}")' },
-        'run_app': { detail: 'gui.run_app()', documentation: 'Запускает главный цикл обработки событий GUI. Эта функция должна вызываться в конце скрипта.', snippet: 'run_app()' },
-        'stop': { detail: 'gui.stop()', documentation: 'Завершает главный цикл обработки событий GUI.', snippet: 'stop()' }
-    }
-};
-
-// --- ОБЩИЕ ДАННЫЕ ДЛЯ ПОДСКАЗОК И ИНФОРМАЦИИ ПРИ НАВЕДЕНИИ ---
-const builtInFunctions = {
-    'print': {
-        detail: 'print(value)',
-        documentation: 'Выводит значение в консоль без переноса строки.',
-        snippet: 'print(${1})'
-    },
-    'println': {
-        detail: 'println(value)',
-        documentation: 'Выводит значение в консоль и добавляет перенос строки.',
-        snippet: 'println(${1})'
-    },
-    'input': {
-        detail: 'input()',
-        documentation: 'Читает строку текста от пользователя.',
-        snippet: 'input()'
-    },
-    'to_int': {
-        detail: 'to_int(value)',
-        documentation: 'Преобразует значение в целое число.',
-        snippet: 'to_int(${1})'
-    },
-    'to_str': {
-        detail: 'to_str(value)',
-        documentation: 'Преобразует значение в строку.',
-        snippet: 'to_str(${1})'
-    },
-    'to_float': {
-        detail: 'to_float(value)',
-        documentation: 'Преобразует значение в число с плавающей точкой.',
-        snippet: 'to_float(${1})'
-    },
-    'type': {
-        detail: 'type(value)',
-        documentation: 'Возвращает тип значения (например, "string", "number").',
-        snippet: 'type(${1})'
-    }
-};
 
 const specialClassMethods = {
     '__main__': {
@@ -749,6 +849,21 @@ function createMethodCompletionItem(method: AnalyzedFunction): vscode.Completion
     return item;
 }
 
+/**
+ * Рекурсивно находит класс и его предков в проанализированной структуре.
+ */
+function findClassAndParents(className: string, analysis: AnalyzedDocument): AnalyzedClass[] {
+    const classInfo = analysis.classes.find(c => c.name === className);
+    if (!classInfo) {
+        return [];
+    }
+    if (classInfo.parent) {
+        // Рекурсивно ищем родителя и добавляем текущий класс в начало
+        return [classInfo, ...findClassAndParents(classInfo.parent, analysis)];
+    }
+    return [classInfo];
+}
+
 // --- ПРОВАЙДЕР ИНФОРМАЦИИ ПРИ НАВЕДЕНИИ (HOVER) ---
 const hoverProvider = vscode.languages.registerHoverProvider(
     'dark',
@@ -758,11 +873,35 @@ const hoverProvider = vscode.languages.registerHoverProvider(
             if (!range) { return; }
             const word = document.getText(range);
 
+            // Улучшенная логика для конструкторов
+            const line = document.lineAt(position.line).text;
+            const constructorCallRegex = new RegExp(`\\b${word}\\s*\\(`);
+            const analysis = getAnalyzedDocument(document);
+            const constructorMatch = line.match(constructorCallRegex);
+
+            if (constructorMatch) {
+                const classHierarchy = findClassAndParents(word, analysis);
+                for (const classInHierarchy of classHierarchy) {
+                    const constructorMethod = classInHierarchy.methods.find(m => m.name === '__main__');
+                    if (constructorMethod) {
+                        const content = new vscode.MarkdownString()
+                            .appendCodeblock(`(constructor) ${classInHierarchy.name}(${constructorMethod.parameters.slice(1).map(p => p.name).join(', ')})`, 'dark')
+                            .appendMarkdown(`---\nКонструктор для класса **${classInHierarchy.name}**.\n\n`)
+                            .appendMarkdown(constructorMethod.documentation);
+                        
+                        if (classInHierarchy.name !== word) {
+                            content.appendMarkdown(`\n\n*Унаследовано от \`${classInHierarchy.name}\`*`);
+                        }
+                        return new vscode.Hover(content, range);
+                    }
+                }
+            }
+
+
             // 1. Проверка на доступ к члену (os.getcwd)
             const lineText = document.lineAt(position.line).text;
             const memberAccessRegex = new RegExp(`([a-zA-Z_]\\w*)\\.${word}\\b`);
             const match = lineText.match(memberAccessRegex);
-            const analysis = getAnalyzedDocument(document);
 
             // 0. Проверка на импорт через `from ... use ...`
             const isUsedImport = analysis.usedImports.some(imp => imp.name === word);
@@ -1162,11 +1301,36 @@ export function activate(context: vscode.ExtensionContext) {
 
     // --- Инициализация UI для denv ---
     (global as any).extensionContext = context; // Сохраняем контекст глобально для доступа
-    denvStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    
+    // Кнопка выбора окружения
+    denvStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
     denvStatusBarItem.command = 'dark.selectDenv';
     context.subscriptions.push(denvStatusBarItem);
+
+    // Кнопка dpm install
+    dpmInstallStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 9);
+    dpmInstallStatusBarItem.command = 'dark.dpm.install';
+    dpmInstallStatusBarItem.tooltip = 'Dark: Установить пакеты (dpm)';
+    context.subscriptions.push(dpmInstallStatusBarItem);
+    dpmInstallStatusBarItem.show();
+
+    // Кнопка dpm list
+    dpmListStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 8);
+    dpmListStatusBarItem.command = 'dark.dpm.list';
+    dpmListStatusBarItem.tooltip = 'Dark: Показать установленные пакеты (dpm)';
+    context.subscriptions.push(dpmListStatusBarItem);
+    dpmListStatusBarItem.show();
+
     registerDenvSelectorCommand(context);
+
+    registerDpmCommands(context); // Регистрируем команды dpm
     updateStatusBar(context);
+
+    // --- Инициализация нового представления DPM ---
+    const dpmProvider = new DpmDependenciesProvider(context);
+    vscode.window.registerTreeDataProvider('darkDpmDependencies', dpmProvider);
+    // Регистрируем команду для обновления и связываем ее с обновлением при смене denv
+    context.subscriptions.push(vscode.commands.registerCommand('dark.dpm.refresh', () => dpmProvider.refresh()));
 
     const runCommand = vscode.commands.registerCommand('dark.run', () => {
         const editor = vscode.window.activeTextEditor;
@@ -1187,18 +1351,13 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
         const filePath = editor.document.uri.fsPath;
-        const terminal = getDarkTerminal();
+        const { terminal, isNew } = getDarkTerminal();
         const selectedDenvPath = context.workspaceState.get<string>('selectedDenvPath');
 
-        // Устанавливаем переменную окружения ПЕРЕД запуском команды
-        if (selectedDenvPath) {
-            if (process.platform === 'win32') {
-                // Для cmd, PowerShell и bash-подобных оболочек (Git Bash) на Windows
-                terminal.sendText(`source "${selectedDenvPath}/bin/activate"`, true);
-            } else {
-                // Для bash/zsh/etc.
-                terminal.sendText(`source "${selectedDenvPath}/bin/activate"`, true);
-            }
+        // Активируем окружение, только если терминал новый и окружение выбрано.
+        if (isNew && selectedDenvPath) {
+            // Команда `source` работает в большинстве популярных оболочек (bash, zsh, git bash на Windows)
+            terminal.sendText(`source "${selectedDenvPath}/bin/activate"`);
         }
 
         terminal.show();

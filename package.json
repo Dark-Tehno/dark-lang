@@ -2,7 +2,7 @@
   "name": "dark-lang",
   "displayName": "The Dark Programming Language",
   "description": "Полная поддержка языка программирования Dark, включая подсветку синтаксиса, автодополнение, проверку ошибок, запуск кода и поддержку пакетного менеджера.",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "publisher": "vsp210",
   "icon": "icon.png",
   "license": "MIT",
@@ -23,7 +23,8 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
   },
   "contributes": {
     "commands": [
@@ -35,6 +36,48 @@
       {
         "command": "dark.selectDenv",
         "title": "Dark: Выбрать окружение (denv)"
+      },
+      {
+        "command": "dark.dpm.install",
+        "title": "Dark: (dpm) Установить пакет(ы)"
+      },
+      {
+        "command": "dark.dpm.uninstall",
+        "title": "Dark: (dpm) Удалить пакет(ы)"
+      },
+      {
+        "command": "dark.dpm.update",
+        "title": "Dark: (dpm) Обновить пакет(ы)"
+      },
+      {
+        "command": "dark.dpm.list",
+        "title": "Dark: (dpm) Показать установленные пакеты"
+      },
+      {
+        "command": "dark.dpm.freeze",
+        "title": "Dark: (dpm) Сохранить пакеты в requirements.txt"
+      },
+      {
+        "command": "dark.dpm.doctor",
+        "title": "Dark: (dpm) Проверить целостность окружения"
+      },
+      {
+        "command": "dark.dpm.uninstall.fromView",
+        "title": "Удалить пакет",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dark.dpm.update.fromView",
+        "title": "Обновить пакет",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "dark.dpm.openPackageDocs",
+        "title": "Dark: (dpm) Открыть документацию пакета"
+      },
+      {
+        "command": "dark.dpm.refresh",
+        "title": "Dark: (dpm) Обновить список пакетов"
       }
     ],
     "menus": {
@@ -44,15 +87,53 @@
           "command": "dark.run",
           "group": "navigation"
         }
+      ],
+      "view/item/context": [
+        {
+          "command": "dark.dpm.uninstall.fromView",
+          "when": "view == darkDpmDependencies && viewItem == dependency",
+          "group": "modification@1"
+        },
+        {
+          "command": "dark.dpm.update.fromView",
+          "when": "view == darkDpmDependencies && viewItem == dependency",
+          "group": "modification@2"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "dark.dpm.refresh",
+          "when": "view == darkDpmDependencies",
+          "group": "navigation",
+          "icon": "$(refresh)"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dark-container",
+          "title": "Dark",
+          "icon": "./icon.png"
+        }
+      ]
+    },
+    "views": {
+      "dark-container": [
+        {
+          "id": "darkDpmDependencies",
+          "name": "Окружение (dpm)",
+          "icon": "$(package)"
+        }
       ]
     },
     "configuration": {
       "title": "Dark Language",
       "properties": {
         "dark.executorPath": {
-          "type": "string",
-          "default": "",
-          "description": "The absolute path to the Dark language executable (e.g., dark_start.exe)."
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Path to the Dark language interpreter executable. If not set, the extension will try to use the selected 'denv' environment or 'dark' from the system's PATH (on Linux/macOS)."
         }
       }
     },
@@ -78,6 +159,15 @@
         "language": "dark",
         "scopeName": "source.dark",
         "path": "./syntaxes/dark.tmLanguage.json"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "dark",
+        "scopes": {
+          "class": ["entity.name.type.class"],
+          "function": ["entity.name.function"]
+        }
       }
     ]
   },

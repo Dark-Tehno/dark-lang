@@ -12,15 +12,33 @@ export const builtInMethods = {
         'startswith': { detail: 'string.startswith(prefix)', documentation: 'Возвращает `true`, если строка начинается с `prefix`.', snippet: 'startswith("${1:prefix}")' },
         'endswith': { detail: 'string.endswith(suffix)', documentation: 'Возвращает `true`, если строка заканчивается на `suffix`.', snippet: 'endswith("${1:suffix}")' },
         'find': { detail: 'string.find(substring)', documentation: 'Ищет подстроку и возвращает индекс первого вхождения или -1, если не найдено.', snippet: 'find("${1:substring}")' },
+        'replace': { detail: 'string.replace(old, new)', documentation: 'Возвращает новую строку, где все вхождения `old` заменены на `new`.', snippet: 'replace("${1:old}", "${2:new}")' },
+        'split': { detail: 'string.split(separator)', documentation: 'Разделяет строку по `separator` и возвращает список подстрок.', snippet: 'split("${1:separator}")' },
+        'join': { detail: 'string.join(list)', documentation: 'Объединяет элементы списка в строку с указанным разделителем.', snippet: 'join(${1:list})' },
     },
     'list': {
         'len': { detail: 'list.len()', documentation: 'Возвращает количество элементов в списке.', snippet: 'len()' },
         'append': { detail: 'list.append(item)', documentation: 'Добавляет элемент в конец списка.', snippet: 'append(${1:item})' },
         'pop': { detail: 'list.pop()', documentation: 'Удаляет и возвращает последний элемент списка.', snippet: 'pop()' },
+        'insert': { detail: 'list.insert(index, item)', documentation: 'Вставляет элемент `item` на позицию `index`.', snippet: 'insert(${1:index}, ${2:item})' },
+        'remove': { detail: 'list.remove(item)', documentation: 'Удаляет первое вхождение элемента `item` из списка.', snippet: 'remove(${1:item})' },
+        'index': { detail: 'list.index(item)', documentation: 'Возвращает индекс первого вхождения элемента `item` в списке.', snippet: 'index(${1:item})' },
+        'count': { detail: 'list.count(item)', documentation: 'Возвращает количество вхождений элемента `item` в списке.', snippet: 'count(${1:item})' },
+        'reverse': { detail: 'list.reverse()', documentation: 'Изменяет порядок элементов списка на обратный.', snippet: 'reverse()' },
+        'sort': { detail: 'list.sort()', documentation: 'Сортирует элементы списка на месте.', snippet: 'sort()' },
+        'clear': { detail: 'list.clear()', documentation: 'Удаляет все элементы из списка.', snippet: 'clear()' },
     },
     'dict': {
         'len': { detail: 'dict.len()', documentation: 'Возвращает количество пар ключ-значение в словаре.', snippet: 'len()' },
         'keys': { detail: 'dict.keys()', documentation: 'Возвращает список всех ключей в словаре.', snippet: 'keys()' },
+        'values': { detail: 'dict.values()', documentation: 'Возвращает список всех значений в словаре.', snippet: 'values()' },
+        'items': { detail: 'dict.items()', documentation: 'Возвращает список всех пар ключ-значение в словаре.', snippet: 'items()' },
+        'get': { detail: 'dict.get(key, default_value)', documentation: 'Возвращает значение по ключу или `default_value`, если ключ не найден.', snippet: 'get(${1:key}, ${2:default_value})' },
+        'pop': { detail: 'dict.pop(key)', documentation: 'Удаляет ключ и возвращает соответствующее значение.', snippet: 'pop(${1:key})' },
+        'popitem': { detail: 'dict.popitem()', documentation: 'Удаляет и возвращает произвольную пару ключ-значение.', snippet: 'popitem()' },
+        'clear': { detail: 'dict.clear()', documentation: 'Удаляет все элементы из словаря.', snippet: 'clear()' },
+        'update': { detail: 'dict.update(other_dict)', documentation: 'Обновляет словарь, добавляя пары ключ-значение из `other_dict`.', snippet: 'update(${1:other_dict})' },
+        'setdefault': { detail: 'dict.setdefault(key, default_value)', documentation: 'Возвращает значение по ключу. Если ключ отсутствует, добавляет его со значением `default_value` и возвращает его.', snippet: 'setdefault(${1:key}, ${2:default_value})' },
     }
 };
 
